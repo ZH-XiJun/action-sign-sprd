@@ -1,0 +1,74 @@
+name: Sign image (avbtool)
+
+on:
+  workflow_dispatch:
+    inputs:
+      BOOT_URL:
+        description: 'URL of the boot/recovery image you want to sign. Leave blank to use the image in your repo'
+        required: false
+        default: ''
+      VBM_URL:
+        description: 'URL of the vbmeta image in your device. Leave blank to use the image in your repo'
+        required: false
+        default: ''
+      TARGET:
+        description: 'Which partition you want to sign?'
+        required: true
+        default: 'boot'
+      SIZE:
+        description: 'What is your boot/recovery PARTITION(not image) size?(size unit is bytes)'
+        required: true
+        default: '36700160'
+      VER:
+        description: 'What is your Android version? (For padding DHTB header to vbmeta)'
+        required: true
+        default: '8'
+        type: choice
+        options:
+        - '8'
+        - '9'
+        - '10'
+        - '11'
+        - '13'
+        - 'vbmeta has no DHTB header, no need for padding'
+jobs:
+  avb-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get image
+        run: | 
+          if [ -z "${{ inputs.BOOT_URL }}" ]; then cp ${{ inputs.TARGET }}.img ./aik/${{ inputs.TARGET }}.img else wget "${{ inputs.BOOT_URL }}" -O ./aik/${{ inputs.TARGET }}.img fi
+          if [ -z "${{ inputs.VBM_URL }}" ]; then cp vbmeta.img ./avbtool/vbmeta.img else wget "${{ inputs.VBM_URL }}" -O ./avbtool/vbmeta.img fi
+          
+      - name: Remove invalid content in your image
+        run: |
+          ./unpackimg.sh ${{ inputs.TARGET }}.img
+          ./repackimg.sh
+          cp -v *-new.img ../avbtool/${{ inputs.TARGET }}.img
+        working-directory: aik
+
+      - name: Sign the image
+        run: |
+          echo "Generate vbmeta sign script..."
+          ./scriptgen vbmeta.img
+          chmod -v 755 sign_vbmeta.sh
+          echo "Sign vbmeta image..."
+          rm -v rsa4096_${{ github.event.inputs.TARGET }}_pub.bin
+          cp -v rsa4096_custom_pub.bin rsa4096_${{ github.event.inputs.TARGET }}_pub.bin
+          ./sign_vbmeta.sh
+          if [ ! '${{ github.event.inputs.VER }}' == 'vbmeta has no DHTB header, no need for padding' ];then python vbmeta_pad_${{ github.event.inputs.VER }}_$(cat sign_vbmeta.sh |grep padding |cut -d' ' -f 2).py; fi || if [ $? == 2 ]; then echo 'Failed to find padding script, did you choose correct Android version? stopping...'&&exit 127; else echo 'Error, stopping'&&exit 1; fi
+          echo "VBMeta signed!"
+          echo "Signing your ${{ github.event.inputs.TARGET }} image..."
+          python avbtool add_hash_footer --image ${{ github.event.inputs.TARGET }}.img --partition_name ${{ github.event.inputs.TARGET }} --partition_size ${{ github.event.inputs.SIZE }} --key rsa4096_vbmeta.pem --algorithm SHA256_RSA4096
+          echo "${{ github.event.inputs.TARGET }} image signed!"
+        working-directory: avbtool
+
+      - name: Upload to Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Signed image
+          path: |
+            avbtool/vbmeta-sign-custom.img
+            avbtool/${{ github.event.inputs.TARGET }}.img
